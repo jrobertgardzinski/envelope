@@ -1,7 +1,6 @@
 package com.jrobertgardzinski.envelope;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.jrobertgardzinski.util.constraint.Outcome;
 import io.qameta.allure.Epic;
 import io.qameta.allure.Feature;
 import org.junit.jupiter.api.DisplayName;
@@ -13,7 +12,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -28,57 +27,56 @@ class EnvelopeTest {
     private static final UUID ID = UUID.fromString("3b8f0e64-2f1d-4b8b-9a44-6f9a2b1c0d55");
 
     private static Envelope envelope(String payload) {
-        return Envelope.read(payload, MAPPER).findValue().orElseThrow();
+        return Envelope.read(payload, MAPPER).value();
     }
 
     @Test
     @DisplayName("a payload that is not JSON is refused, never thrown")
     void not_json_is_a_refusal() {
-        Outcome<Envelope> read = Envelope.read("{not json at all", MAPPER);
+        Envelope.Result<Envelope> read = Envelope.read("{not json at all", MAPPER);
 
-        assertEquals(List.of(Envelope.NOT_JSON), read.errorCodes(),
+        assertEquals(List.of(Envelope.NOT_JSON), read.errors(),
                 "a listener that THROWS here gets the record redelivered for ever and stops the"
                         + " partition; one bad event must not hold up every good one behind it");
-        assertTrue(read.findValue().isEmpty());
+        assertNull(read.value());
     }
 
     @Test
     @DisplayName("a required field that is blank is refused by its own name")
     void a_blank_required_field_names_itself() {
-        Outcome<String> email = envelope("{\"email\":\"  \"}").requiredText("email");
+        Envelope.Result<String> email = envelope("{\"email\":\"  \"}").requiredText("email");
 
-        assertEquals(List.of("EMAIL_BLANK"), email.errorCodes());
+        assertEquals(List.of("EMAIL_BLANK"), email.errors());
     }
 
     @Test
     @DisplayName("a required identifier tells absent and mangled apart, and refuses both")
     void a_required_identifier_distinguishes_its_refusals() {
-        assertEquals(List.of("ID_MISSING"), envelope("{}").requiredUuid("id").errorCodes());
+        assertEquals(List.of("ID_MISSING"), envelope("{}").requiredUuid("id").errors());
         assertEquals(List.of("ID_MANGLED"),
-                envelope("{\"id\":\"not-an-id\"}").requiredUuid("id").errorCodes(),
+                envelope("{\"id\":\"not-an-id\"}").requiredUuid("id").errors(),
                 "\"the producer forgot the field\" and \"the producer wrote nonsense into it\""
                         + " send an operator to different places");
-        assertEquals(ID, envelope("{\"id\":\"" + ID + "\"}").requiredUuid("id")
-                .findValue().orElseThrow());
+        assertEquals(ID, envelope("{\"id\":\"" + ID + "\"}").requiredUuid("id").value());
     }
 
     @Test
     @DisplayName("an ABSENT optional identifier is allowed — that is an older producer")
     void an_absent_optional_identifier_degrades() {
-        Outcome<Optional<UUID>> sagaId = envelope("{\"type\":\"X\"}").optionalUuid("sagaId");
+        Envelope.Result<Optional<UUID>> sagaId = envelope("{\"type\":\"X\"}").optionalUuid("sagaId");
 
-        assertTrue(sagaId.errorCodes().isEmpty());
-        assertTrue(sagaId.findValue().orElseThrow().isEmpty(),
+        assertTrue(sagaId.errors().isEmpty());
+        assertTrue(sagaId.value().isEmpty(),
                 "the caller degrades to whatever it did before the field existed");
     }
 
     @Test
     @DisplayName("a PRESENT but unreadable optional identifier is refused, not degraded")
     void a_mangled_optional_identifier_is_not_an_old_producer() {
-        Outcome<Optional<UUID>> sagaId =
+        Envelope.Result<Optional<UUID>> sagaId =
                 envelope("{\"sagaId\":\"nonsense\"}").optionalUuid("sagaId");
 
-        assertEquals(List.of("SAGAID_MANGLED"), sagaId.errorCodes(),
+        assertEquals(List.of("SAGAID_MANGLED"), sagaId.errors(),
                 "degrading here would re-open by the back door exactly the hole the field was"
                         + " added to close: a broken correlation landing on whatever case happens"
                         + " to be running");
@@ -89,23 +87,22 @@ class EnvelopeTest {
     void an_oversized_object_is_a_warning_not_a_refusal() {
         String big = "{\"policy\":{\"memes\":\"" + "x".repeat(200) + "\"}}";
 
-        Outcome<Optional<com.fasterxml.jackson.databind.JsonNode>> policy =
+        Envelope.Result<Optional<com.fasterxml.jackson.databind.JsonNode>> policy =
                 envelope(big).objectWithin("policy", 64);
 
-        assertInstanceOf(Outcome.AllowedWithWarning.class, policy,
+        assertTrue(policy.errors().isEmpty(),
                 "an oversized extra is no reason to abandon a deletion");
-        assertTrue(policy.findValue().orElseThrow().isEmpty(), "but it does not ride along");
-        assertEquals(List.of("POLICY_OVERSIZED"),
-                ((Outcome.AllowedWithWarning<?>) policy).warningCodes());
+        assertTrue(policy.value().isEmpty(), "but it does not ride along");
+        assertEquals(List.of("POLICY_OVERSIZED"), policy.warnings());
     }
 
     @Test
     @DisplayName("an object within the ceiling rides along untouched")
     void a_small_object_is_kept() {
-        Outcome<Optional<com.fasterxml.jackson.databind.JsonNode>> policy =
+        Envelope.Result<Optional<com.fasterxml.jackson.databind.JsonNode>> policy =
                 envelope("{\"policy\":{\"memes\":\"DELETE\"}}").objectWithin("policy", 8192);
 
-        assertEquals("DELETE", policy.findValue().orElseThrow().orElseThrow().path("memes").asText());
+        assertEquals("DELETE", policy.value().orElseThrow().path("memes").asText());
     }
 
     @Test

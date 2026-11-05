@@ -2,7 +2,6 @@ package com.jrobertgardzinski.envelope;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.jrobertgardzinski.util.constraint.Outcome;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -15,8 +14,8 @@ import java.util.UUID;
  * <p>Everything here answers the same question — <em>what do I do with a record I cannot use?</em>
  * — and the answer is never "throw". A listener that throws on a malformed record gets it
  * redelivered, throws again, and stops the partition: one bad event silently holds up every good
- * one behind it, for ever. So a record that no retry could fix is REFUSED, and a refusal is an
- * {@link Outcome} the caller logs and commits past.
+ * one behind it, for ever. So a record that no retry could fix is REFUSED, and a refusal is a
+ * {@link Result} with a code in {@code errors()} — the caller logs it and commits past.
  *
  * <p>The distinction this type exists to keep, learned the hard way: <strong>absent is not the same
  * as mangled</strong>. A field that is missing usually means an older producer, and degrading
@@ -40,6 +39,26 @@ public final class Envelope {
     /** An optional object was larger than the caller allows; the event is used without it. */
     public static final String OVERSIZED = "_OVERSIZED";
 
+    /**
+     * What every read here answers: the value, present only when nothing refused it ({@code null}
+     * otherwise); the refusals, one code each; and the warnings, for a value that is used minus
+     * something. The gate is {@code errors().isEmpty()}.
+     */
+    public record Result<T>(T value, List<String> errors, List<String> warnings) {
+        public Result {
+            errors = List.copyOf(errors);
+            warnings = List.copyOf(warnings);
+        }
+    }
+
+    private static <T> Result<T> allowed(T value) {
+        return new Result<>(value, List.of(), List.of());
+    }
+
+    private static <T> Result<T> refused(String code) {
+        return new Result<>(null, List.of(code), List.of());
+    }
+
     private final JsonNode event;
     private final ObjectMapper mapper;
 
@@ -52,11 +71,11 @@ public final class Envelope {
      * Reads a payload, or refuses it. The caller's mapper is used rather than one of ours, because
      * a service that has configured its own is entitled to be read by it.
      */
-    public static Outcome<Envelope> read(String payload, ObjectMapper mapper) {
+    public static Result<Envelope> read(String payload, ObjectMapper mapper) {
         try {
-            return new Outcome.Allowed<>(new Envelope(mapper.readTree(payload), mapper));
+            return allowed(new Envelope(mapper.readTree(payload), mapper));
         } catch (Exception notJson) {
-            return new Outcome.Rejected<>(List.of(NOT_JSON));
+            return refused(NOT_JSON);
         }
     }
 
@@ -71,11 +90,11 @@ public final class Envelope {
     }
 
     /** A required, non-blank string — an address, a name, a topic. */
-    public Outcome<String> requiredText(String field) {
+    public Result<String> requiredText(String field) {
         String value = event.path(field).asText();
         return value.isBlank()
-                ? new Outcome.Rejected<>(List.of(field.toUpperCase() + BLANK))
-                : new Outcome.Allowed<>(value);
+                ? refused(field.toUpperCase() + BLANK)
+                : allowed(value);
     }
 
     /**
@@ -84,14 +103,14 @@ public final class Envelope {
      * forgot the field" and "the producer wrote nonsense into it" send an operator to different
      * places.
      */
-    public Outcome<UUID> requiredUuid(String field) {
+    public Result<UUID> requiredUuid(String field) {
         if (!event.hasNonNull(field)) {
-            return new Outcome.Rejected<>(List.of(field.toUpperCase() + MISSING));
+            return refused(field.toUpperCase() + MISSING);
         }
         try {
-            return new Outcome.Allowed<>(UUID.fromString(event.get(field).asText()));
+            return allowed(UUID.fromString(event.get(field).asText()));
         } catch (IllegalArgumentException mangled) {
-            return new Outcome.Rejected<>(List.of(field.toUpperCase() + MANGLED));
+            return refused(field.toUpperCase() + MANGLED);
         }
     }
 
@@ -103,14 +122,14 @@ public final class Envelope {
      * the field and got it wrong, so the record is mangled rather than old, and treating it as old
      * would let a broken correlation land on whatever case happened to be running.
      */
-    public Outcome<Optional<UUID>> optionalUuid(String field) {
+    public Result<Optional<UUID>> optionalUuid(String field) {
         if (!event.has(field)) {
-            return new Outcome.Allowed<>(Optional.empty());
+            return allowed(Optional.empty());
         }
         try {
-            return new Outcome.Allowed<>(Optional.of(UUID.fromString(event.get(field).asText())));
+            return allowed(Optional.of(UUID.fromString(event.get(field).asText())));
         } catch (IllegalArgumentException mangled) {
-            return new Outcome.Rejected<>(List.of(field.toUpperCase() + MANGLED));
+            return refused(field.toUpperCase() + MANGLED);
         }
     }
 
@@ -118,22 +137,22 @@ public final class Envelope {
      * An optional object the caller only ferries — a policy, a set of choices — with a ceiling on
      * how big it may be.
      *
-     * <p>Over the ceiling the event is still USED, without the field: that is an
-     * {@link Outcome.AllowedWithWarning}, not a rejection, because an oversized extra is no reason
-     * to abandon a deletion. The ceiling itself is not decoration: an object read here is typically
+     * <p>Over the ceiling the event is still USED, without the field: that is a code in
+     * {@code warnings()}, not in {@code errors()}, because an oversized extra is no reason to
+     * abandon a deletion. The ceiling itself is not decoration: an object read here is typically
      * stored and re-sent, so an unbounded one rides into a database column and then into every
      * later message.
      */
-    public Outcome<Optional<JsonNode>> objectWithin(String field, int maxBytes) {
+    public Result<Optional<JsonNode>> objectWithin(String field, int maxBytes) {
         JsonNode value = event.path(field);
         if (!value.isObject()) {
-            return new Outcome.Allowed<>(Optional.empty());
+            return allowed(Optional.empty());
         }
         if (serialised(value).getBytes(StandardCharsets.UTF_8).length > maxBytes) {
-            return new Outcome.AllowedWithWarning<>(Optional.empty(),
+            return new Result<>(Optional.empty(), List.of(),
                     List.of(field.toUpperCase() + OVERSIZED));
         }
-        return new Outcome.Allowed<>(Optional.of(value));
+        return allowed(Optional.of(value));
     }
 
     /**

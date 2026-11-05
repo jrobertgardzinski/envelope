@@ -16,9 +16,9 @@
       rejected event is exactly where an e-mail address escapes into a system with its own
       retention. Splitting them would mean wiring two libraries to write one WARN.
 
-      Refusals are the estate's own Outcome, so a poison pill reads like every other rejection in
-      this codebase — and the over-large policy really is an AllowedWithWarning: the event is used,
-      minus the field that did not fit.
+      A read answers with the library's own Result record: a value, the refusal codes, the warning
+      codes. A poison pill is a code in errors(); the over-large policy is a code in warnings(),
+      because the event is used, minus the field that did not fit.
     -->
     <properties>
         <maven.compiler.release>25</maven.compiler.release>
@@ -26,11 +26,6 @@
     </properties>
 
     <dependencies>
-        <dependency>
-            <groupId>com.jrobertgardzinski</groupId>
-            <artifactId>constraint</artifactId>
-            <version>1.0.0-SNAPSHOT</version>
-        </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
